@@ -46,13 +46,15 @@ import re, numpy as np, faiss, tiktoken
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
-tiktoken_cache_dir = "/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/tiktoken"
+
+tiktoken_cache_dir = "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/tiktoken"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
 # ---------------------------------------------------------------------------
 # Globale Ressourcen
 # ---------------------------------------------------------------------------
-ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
-_EMBED_MODEL      = SentenceTransformer("/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/model")
+ENC               = tiktoken.get_encoding("cl100k_base")
+_EMBED_MODEL = SentenceTransformer("/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/model")
+
 
 # ---------------------------------------------------------------------------
 # PDF-Artefakte bereinigen
@@ -61,6 +63,7 @@ def clean_pdf_artifacts(text: str) -> str:
     text = re.sub(r"(?:\b\w\b[\s­]?){4,}", lambda m: re.sub(r"[\s­]", "", m.group(0)), text)
     text = re.sub(r"(\w)[-\u00AD]\s*\n\s*(\w)", r"\1\2", text)
     return re.sub(r"[ \t\f\v]+", " ", text).strip()
+
 
 # ---------------------------------------------------------------------------
 # Chunking
@@ -83,14 +86,19 @@ def chunk_docs(docs: Sequence[str], *, max_chunk_tokens: int, overlap: int) -> t
             pos += tok - overlap
     return chunks, meta
 
+
 # ---------------------------------------------------------------------------
 # Embedding & Index
 # ---------------------------------------------------------------------------
 def embed(txts: Sequence[str]) -> np.ndarray:
     return _EMBED_MODEL.encode(txts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
 
+
 def build_faiss_index(vecs: np.ndarray) -> faiss.IndexFlatIP:
-    idx = faiss.IndexFlatIP(vecs.shape[1]); idx.add(vecs); return idx
+    idx = faiss.IndexFlatIP(vecs.shape[1]);
+    idx.add(vecs);
+    return idx
+
 
 # ---------------------------------------------------------------------------
 # Near-Duplicate-Filter
@@ -105,11 +113,13 @@ def dedup_passages_info(recs: list[dict], *, thresh=0.90) -> list[dict]:
         keep[i + 1:][sims >= thresh] = False
     return [r for r, k in zip(recs, keep) if k]
 
+
 # ---------------------------------------------------------------------------
 # Maximale Marginal Relevance
 # ---------------------------------------------------------------------------
 def mmr_select(mat: np.ndarray, q: np.ndarray, k: int, lam: float) -> list[int]:
-    sim_q = (mat @ q).flatten(); sel = []
+    sim_q = (mat @ q).flatten();
+    sel = []
     while len(sel) < k and len(sel) < len(mat):
         if not sel:
             sel.append(int(sim_q.argmax()))
@@ -120,6 +130,7 @@ def mmr_select(mat: np.ndarray, q: np.ndarray, k: int, lam: float) -> list[int]:
         sel.append(int(score.argmax()))
     return sel
 
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -127,19 +138,19 @@ DEF = dict(chunk_size=256, overlap=32, cos_min=0.30, mmr_lambda=0.20)
 CROSS_MIN = 0.1
 MAX_CHARS = 350
 
+
 # ---------------------------------------------------------------------------
 # Hauptfunktion
 # ---------------------------------------------------------------------------
 def retrieve_for_table(
-    columns: Sequence[Tuple[str, str, Dict[str, Any] | None]],
-    docs:    Sequence[Tuple[str, str]],
-    *,
-    k: int = 5,
-    use_rerank: bool = False,
-    dedup_thresh: float = 0.90,
-    debug: bool = False,
+        columns: Sequence[Tuple[str, str, Dict[str, Any] | None]],
+        docs: Sequence[Tuple[str, str]],
+        *,
+        k: int = 5,
+        use_rerank: bool = False,
+        dedup_thresh: float = 0.90,
+        debug: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
-
     # Rohtexte splitten ----------------------------------------------------
     befund_ids, befund_txts, = zip(*docs)
 
@@ -169,15 +180,15 @@ def retrieve_for_table(
         chunks, meta, vecs, index = get_cached(cfg["chunk_size"], cfg["overlap"])
         info = [{"befund_id": befund_ids[m["doc_id"]],
                  "start_tok": m["start_tok"],
-                 "end_tok":   m["end_tok"],
-                 "text":      chunks[i]} for i, m in enumerate(meta)]
+                 "end_tok": m["end_tok"],
+                 "text": chunks[i]} for i, m in enumerate(meta)]
 
         query = f"{name}: {descr}".strip()
         q_vec = embed([query])
 
         n = max(k * 5, 10)
         cos, I = index.search(q_vec, n)
-        cross = (reranker.predict([[query, chunks[i]] for i in I[0]]) if use_rerank else [None]*n)
+        cross = (reranker.predict([[query, chunks[i]] for i in I[0]]) if use_rerank else [None] * n)
 
         passed, p_vecs = [], []
         for rnk, idx in enumerate(I[0]):
@@ -186,9 +197,10 @@ def retrieve_for_table(
                 print(rec)
             if cos[0][rnk] < cfg["cos_min"]: continue
             if cross[rnk] is not None and cross[rnk] < CROSS_MIN: continue
-            
+
             if len(rec["text"]) > MAX_CHARS: rec["text"] = rec["text"][:MAX_CHARS] + " …"
-            passed.append(rec); p_vecs.append(vecs[idx])
+            passed.append(rec);
+            p_vecs.append(vecs[idx])
 
         if not passed: out[name] = []; continue
         passed = dedup_passages_info(passed, thresh=dedup_thresh)
@@ -221,9 +233,11 @@ if __name__ == "__main__":
     ]
     cols = [
         ("Name", "Nachname des Patienten", {"chunk_size": 8, "overlap": 3, "cos_min": 0.18, "mmr_lambda": 0.05}),
-        ("Therapie", "Verabreichte Therapie und Behandlung", {"chunk_size": 20, "cos_min" : 0.18, "overlap": 3, "mmr_lambda": 0.02}),
+        ("Therapie", "Verabreichte Therapie und Behandlung",
+         {"chunk_size": 20, "cos_min": 0.18, "overlap": 3, "mmr_lambda": 0.02}),
         ("Prognosefaktor", "Einfluss auf Überleben", None)
     ]
     res = retrieve_for_table(cols, docs, k=3, debug=True, use_rerank=False)
-    from pprint import pprint; pprint(res, width=120)
+    from pprint import pprint;
 
+    pprint(res, width=120)
