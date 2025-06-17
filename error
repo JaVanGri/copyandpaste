@@ -1,22 +1,39 @@
-ary=cuda variant=v12 compute=8.0 driver=12.2 name="NVIDIA A100 80GB PCIe" total="79.3 GiB" available="78.9 GiB"
-time=2025-06-17T15:32:38.383Z level=INFO source=types.go:130 msg="inference compute" id=GPU-72fa135e-5b01-fd4d-635a-151808930ee8 library=cuda variant=v12 compute=8.0 driver=12.2 name="NVIDIA A100 80GB PCIe" total="79.3 GiB" available="78.9 GiB"
-Traceback (most recent call last):
-  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/sdexllm.py", line 16, in <module>
-    from utils.rag import retrieve_for_table
-  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/utils/rag.py", line 49, in <module>
-    _EMBED_MODEL = SentenceTransformer("/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/model")
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/sentence_transformers/SentenceTransformer.py", line 309, in __init__
-    modules, self.module_kwargs = self._load_sbert_model(
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/sentence_transformers/SentenceTransformer.py", line 1553, in _load_sbert_model
-    self._model_config = json.load(fIn)
-  File "/opt/conda/envs/omini_env/lib/python3.10/json/__init__.py", line 293, in load
-    return loads(fp.read(),
-  File "/opt/conda/envs/omini_env/lib/python3.10/json/__init__.py", line 346, in loads
-    return _default_decoder.decode(s)
-  File "/opt/conda/envs/omini_env/lib/python3.10/json/decoder.py", line 337, in decode
-    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
-  File "/opt/conda/envs/omini_env/lib/python3.10/json/decoder.py", line 355, in raw_decode
-    raise JSONDecodeError("Expecting value", s, err.value) from None
-json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
-Python-Skript beendet (Exit Code: 1). Beende ollama (PID: 1611980)...
-[vanjan02@hpc01-gpunode011 omini]$
+def merge_overlapping_segments(segments):
+    """
+    Nimmt eine Liste von Segment-Dicts mit 'start_tok', 'end_tok', 'text', 'label' und
+    gibt eine neue Liste zurück, in der überlappende Bereiche zusammengeführt sind.
+    """
+    if not segments:
+        return []
+
+    # 1) nach Start-Token sortieren
+    segments_sorted = sorted(segments, key=lambda s: s['start_tok'])
+    
+    # 2) Initialisierung mit erstem Segment
+    current = segments_sorted[0].copy()
+    labels = { current['label'] }
+    
+    merged = []
+    
+    # 3) Iteration über die restlichen Segmente
+    for seg in segments_sorted[1:]:
+        if seg['start_tok'] <= current['end_tok']:
+            # Überlappt: Token-Bereich erweitern
+            current['end_tok'] = max(current['end_tok'], seg['end_tok'])
+            labels.add(seg['label'])
+            # Als 'text' wählen wir z.B. den längsten Textabschnitt
+            if len(seg['text']) > len(current['text']):
+                current['text'] = seg['text']
+        else:
+            # Kein Overlap: aktuelles zusammengebautes Segment abschließen
+            current['labels'] = list(labels)
+            merged.append(current)
+            # Neues Basis-Segment starten
+            current = seg.copy()
+            labels = { seg['label'] }
+    
+    # Letztes Segment nicht vergessen
+    current['labels'] = list(labels)
+    merged.append(current)
+    
+    return merged
