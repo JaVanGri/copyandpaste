@@ -1,58 +1,227 @@
-Traceback (most recent call last):
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 787, in urlopen
-    response = self._make_request(
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 488, in _make_request
-    raise new_e
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 464, in _make_request
-    self._validate_conn(conn)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 1093, in _validate_conn
-    conn.connect()
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connection.py", line 704, in connect
-    self.sock = sock = self._new_conn()
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connection.py", line 213, in _new_conn
-    raise NewConnectionError(
-urllib3.exceptions.NewConnectionError: <urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable
+##############################################################################
+# RAG-Helper  —  Chunking · Embedding · FAISS-Retrieval (spalten­spezifisch)
+# Version 2025-06-16
+#
+# pip install
+#     sentence-transformers
+#     tiktoken
+#     langchain-text-splitters
+#     faiss-cpu        # oder faiss-gpu
+##############################################################################
+"""
+retrieve_for_table
+------------------
+columns : Sequence[
+             Tuple[
+                 str,               # Spaltenname   – z. B. "Therapie"
+                 str,               # Beschreibung  – LLM-Prompt-Kontext
+                 Dict[str, Any] | None   # per-Spalten-Konfig (optional)
+             ]
+         ]
+docs    : Sequence[(befund_id:str, raw_text:str)]
+k       : Rückgabe-Passagen pro Spalte
 
-The above exception was the direct cause of the following exception:
+Spalten-Konfig-Keys (alle optional, sonst Default):
+    chunk_size   : int   – Chunk-Länge in BPE-Tokens    (Default 256)
+    overlap      : int   – Überlappung in Tokens        (Default 32)
+    cos_min      : float – Cosine-Schwellwert           (Default 0.30)
+    mmr_lambda   : float – MMR-Gewicht 0–1 (Diversität) (Default 0.20)
 
-Traceback (most recent call last):
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/adapters.py", line 667, in send
-    resp = conn.urlopen(
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 841, in urlopen
-    retries = retries.increment(
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/util/retry.py", line 519, in increment
-    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
-urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='openaipublic.blob.core.windows.net', port=443): Max retries exceeded with url: /encodings/cl100k_base.tiktoken (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable'))
+Beispielaufruf
+--------------
+cols = [
+    ("Name",          "Nachname des Patienten",
+        {"chunk_size": 64,  "overlap": 8,  "cos_min": 0.18, "mmr_lambda": 0.05}),
+    ("Therapie",      "Verabreichte Behandlung",
+        {"chunk_size": 256, "overlap": 32, "cos_min": 0.30, "mmr_lambda": 0.20}),
+    ("Prognosefaktor","Einfluss auf Überleben", None)   # Defaults
+]
+rows = retrieve_for_table(cols, befund_docs, k=3, debug=True)
+"""
+# ---------------------------------------------------------------------------
 
-During handling of the above exception, another exception occurred:
+from __future__ import annotations
+from typing import List, Tuple, Sequence, Dict, Any
+import re, numpy as np, faiss, tiktoken
+from sentence_transformers import SentenceTransformer
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-Traceback (most recent call last):
-  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/sdexllm.py", line 16, in <module>
-    from utils.rag import retrieve_for_table
-  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/utils/rag.py", line 52, in <module>
-    ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/model.py", line 110, in encoding_for_model
-    return get_encoding(encoding_name_for_model(model_name))
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/registry.py", line 86, in get_encoding
-    enc = Encoding(**constructor())
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken_ext/openai_public.py", line 76, in cl100k_base
-    mergeable_ranks = load_tiktoken_bpe(
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 148, in load_tiktoken_bpe
-    contents = read_file_cached(tiktoken_bpe_file, expected_hash)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 63, in read_file_cached
-    contents = read_file(blobpath)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 22, in read_file
-    resp = requests.get(blobpath)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/api.py", line 73, in get
-    return request("get", url, params=params, **kwargs)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/api.py", line 59, in request
-    return session.request(method=method, url=url, **kwargs)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/sessions.py", line 589, in request
-    resp = self.send(prep, **send_kwargs)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/sessions.py", line 703, in send
-    r = adapter.send(request, **kwargs)
-  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/adapters.py", line 700, in send
-    raise ConnectionError(e, request=request)
-requests.exceptions.ConnectionError: HTTPSConnectionPool(host='openaipublic.blob.core.windows.net', port=443): Max retries exceeded with url: /encodings/cl100k_base.tiktoken (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable'))
-Python-Skript beendet (Exit Code: 1). Beende ollama (PID: 1583493)...
-[vanjan02@hpc01-gpunode011 omini]$
+# ---------------------------------------------------------------------------
+# Globale Ressourcen
+# ---------------------------------------------------------------------------
+ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
+_EMBED_MODEL      = SentenceTransformer("/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/model")
+
+# ---------------------------------------------------------------------------
+# PDF-Artefakte bereinigen
+# ---------------------------------------------------------------------------
+def clean_pdf_artifacts(text: str) -> str:
+    text = re.sub(r"(?:\b\w\b[\s­]?){4,}", lambda m: re.sub(r"[\s­]", "", m.group(0)), text)
+    text = re.sub(r"(\w)[-\u00AD]\s*\n\s*(\w)", r"\1\2", text)
+    return re.sub(r"[ \t\f\v]+", " ", text).strip()
+
+# ---------------------------------------------------------------------------
+# Chunking
+# ---------------------------------------------------------------------------
+def chunk_docs(docs: Sequence[str], *, max_chunk_tokens: int, overlap: int) -> tuple[list[str], list[dict]]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max_chunk_tokens,
+        chunk_overlap=overlap,
+        length_function=lambda s: len(ENC.encode(s)),
+        separators=["\n\n", "\n", ". ", " "],
+    )
+    chunks, meta = [], []
+    for d_id, raw in enumerate(docs):
+        txt = clean_pdf_artifacts(raw)
+        pos = 0
+        for c_id, chunk in enumerate(splitter.split_text(txt)):
+            tok = len(ENC.encode(chunk))
+            chunks.append(chunk)
+            meta.append({"doc_id": d_id, "chunk_id": c_id, "start_tok": pos, "end_tok": pos + tok})
+            pos += tok - overlap
+    return chunks, meta
+
+# ---------------------------------------------------------------------------
+# Embedding & Index
+# ---------------------------------------------------------------------------
+def embed(txts: Sequence[str]) -> np.ndarray:
+    return _EMBED_MODEL.encode(txts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+
+def build_faiss_index(vecs: np.ndarray) -> faiss.IndexFlatIP:
+    idx = faiss.IndexFlatIP(vecs.shape[1]); idx.add(vecs); return idx
+
+# ---------------------------------------------------------------------------
+# Near-Duplicate-Filter
+# ---------------------------------------------------------------------------
+def dedup_passages_info(recs: list[dict], *, thresh=0.90) -> list[dict]:
+    if len(recs) <= 1: return recs
+    vecs = embed([r["text"] for r in recs])
+    keep = np.ones(len(recs), bool)
+    for i in range(len(recs)):
+        if not keep[i]: continue
+        sims = vecs[i + 1:] @ vecs[i]
+        keep[i + 1:][sims >= thresh] = False
+    return [r for r, k in zip(recs, keep) if k]
+
+# ---------------------------------------------------------------------------
+# Maximale Marginal Relevance
+# ---------------------------------------------------------------------------
+def mmr_select(mat: np.ndarray, q: np.ndarray, k: int, lam: float) -> list[int]:
+    sim_q = (mat @ q).flatten(); sel = []
+    while len(sel) < k and len(sel) < len(mat):
+        if not sel:
+            sel.append(int(sim_q.argmax()))
+            continue
+        max_sim = (mat[sel] @ mat.T).max(axis=0)
+        score = lam * sim_q - (1 - lam) * max_sim
+        score[sel] = -1
+        sel.append(int(score.argmax()))
+    return sel
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+DEF = dict(chunk_size=256, overlap=32, cos_min=0.30, mmr_lambda=0.20)
+CROSS_MIN = 0.1
+MAX_CHARS = 350
+
+# ---------------------------------------------------------------------------
+# Hauptfunktion
+# ---------------------------------------------------------------------------
+def retrieve_for_table(
+    columns: Sequence[Tuple[str, str, Dict[str, Any] | None]],
+    docs:    Sequence[Tuple[str, str]],
+    *,
+    k: int = 5,
+    use_rerank: bool = False,
+    dedup_thresh: float = 0.90,
+    debug: bool = False,
+) -> Dict[str, List[Dict[str, Any]]]:
+
+    # Rohtexte splitten ----------------------------------------------------
+    befund_ids, befund_txts, = zip(*docs)
+
+    # Cache: (size, ovl) -> (chunks, meta, vecs, index)
+    cache: dict[tuple[int, int], tuple[list[str], list[dict], np.ndarray, faiss.IndexFlatIP]] = {}
+
+    def get_cached(size, ovl):
+        key = (size, ovl)
+        if key not in cache:
+            ch, mt = chunk_docs(befund_txts, max_chunk_tokens=size, overlap=ovl)
+            vec = embed(ch)
+            cache[key] = (ch, mt, vec, build_faiss_index(vec))
+        return cache[key]
+
+    # Cross-Encoder optional
+    if use_rerank:
+        from sentence_transformers import CrossEncoder
+        reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+    # Ergebnis-Dict
+    out: Dict[str, List[Dict[str, Any]]] = {}
+
+    # Schleife über Spalten -------------------------------------------------
+    for name, descr, cfg_raw in columns:
+        cfg = {**DEF, **(cfg_raw or {})}
+
+        chunks, meta, vecs, index = get_cached(cfg["chunk_size"], cfg["overlap"])
+        info = [{"befund_id": befund_ids[m["doc_id"]],
+                 "start_tok": m["start_tok"],
+                 "end_tok":   m["end_tok"],
+                 "text":      chunks[i]} for i, m in enumerate(meta)]
+
+        query = f"{name}: {descr}".strip()
+        q_vec = embed([query])
+
+        n = max(k * 5, 10)
+        cos, I = index.search(q_vec, n)
+        cross = (reranker.predict([[query, chunks[i]] for i in I[0]]) if use_rerank else [None]*n)
+
+        passed, p_vecs = [], []
+        for rnk, idx in enumerate(I[0]):
+            rec = {**info[idx], "cosine": float(cos[0][rnk])}
+            if 'Jan' in rec['text']:
+                print(rec)
+            if cos[0][rnk] < cfg["cos_min"]: continue
+            if cross[rnk] is not None and cross[rnk] < CROSS_MIN: continue
+            
+            if len(rec["text"]) > MAX_CHARS: rec["text"] = rec["text"][:MAX_CHARS] + " …"
+            passed.append(rec); p_vecs.append(vecs[idx])
+
+        if not passed: out[name] = []; continue
+        passed = dedup_passages_info(passed, thresh=dedup_thresh)
+        p_vecs = embed([r["text"] for r in passed])
+
+        if cfg["mmr_lambda"] > 0 and len(passed) > k:
+            sel = mmr_select(np.vstack(p_vecs), q_vec.squeeze(), k=k, lam=cfg["mmr_lambda"])
+            passed = [passed[i] for i in sel]
+
+        out[name] = passed[:k]
+
+        if debug:
+            print(f"\n▌{name}  cfg={cfg}  hits={len(out[name])}")
+            for i, rec in enumerate(out[name], 1):
+                txt = rec['text'].replace('\n', ' ')[:120]
+                print(f"{i:>2}. [{rec['befund_id']} {rec['start_tok']}-{rec['end_tok']}] {txt}")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Minimal-Test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    docs = [
+        ("Befund1.txt", "Name: Max Mustermann\nLDH 312 U/l\nTherapie: Lenalidomid 22 mg ..."),
+        ("Befund2.txt", "Behandlung mit Retowax 9 ...")
+
+    ]
+    cols = [
+        ("Name", "Nachname des Patienten", {"chunk_size": 8, "overlap": 3, "cos_min": 0.18, "mmr_lambda": 0.05}),
+        ("Therapie", "Verabreichte Therapie und Behandlung", {"chunk_size": 20, "cos_min" : 0.18, "overlap": 3, "mmr_lambda": 0.02}),
+        ("Prognosefaktor", "Einfluss auf Überleben", None)
+    ]
+    res = retrieve_for_table(cols, docs, k=3, debug=True, use_rerank=False)
+    from pprint import pprint; pprint(res, width=120)
+
