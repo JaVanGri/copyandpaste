@@ -46,11 +46,12 @@ import re, numpy as np, faiss, tiktoken
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+tiktoken_cache_dir = "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/tiktoken"
 # ---------------------------------------------------------------------------
 # Globale Ressourcen
 # ---------------------------------------------------------------------------
 ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
-_EMBED_MODEL      = SentenceTransformer("/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/model")
+_EMBED_MODEL      = SentenceTransformer("/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/model")
 
 # ---------------------------------------------------------------------------
 # PDF-Artefakte bereinigen
