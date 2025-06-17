@@ -1,217 +1,58 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-End-to-end Workflow für die Aufbereitung patientenbezogener Textdaten.
-Bei gesetztem SKIP_EXISTING werden Teilschritte übersprungen, wenn die
-jeweiligen Ausgabedateien bereits vorhanden sind.
-"""
+Traceback (most recent call last):
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 488, in _make_request
+    raise new_e
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connection.py", line 704, in connect
+    self.sock = sock = self._new_conn()
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connection.py", line 213, in _new_conn
+    raise NewConnectionError(
+urllib3.exceptions.NewConnectionError: <urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable
 
-import logging
-import sys
-import re
-from datetime import date
-from pathlib import Path
-from dateutil.relativedelta import relativedelta
+The above exception was the direct cause of the following exception:
 
-import numpy as np
+Traceback (most recent call last):
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/adapters.py", line 667, in send
+    resp = conn.urlopen(
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/urllib3/util/retry.py", line 519, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='openaipublic.blob.core.windows.net', port=443): Max retries exceeded with url: /encodings/cl100k_base.tiktoken (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable'))
 
-from utils.llmutils import (
-    init_llm,
-    read_text_file,
-    run_llm_task,
-    setup_logging,
-    parse_args,
-)
-from utils.stringdateutils import find_dates, normalize_date, DATE_REGEX
+During handling of the above exception, another exception occurred:
 
-# ------------------------------------------------------------------------------
-# Globale Schalter
-# ------------------------------------------------------------------------------
-SKIP_EXISTING = True          # ← True ⇒ vorhandene Outputs werden wiederverwendet
-# ------------------------------------------------------------------------------
-
-
-def main() -> None:
-    """Orchestriert den vollständigen Workflow."""
-    setup_logging()
-    args = parse_args()
-
-    # CLI-Override, falls parse_args() bereits --skip-existing kennt
-    skip_existing = getattr(args, "skip_existing", SKIP_EXISTING)
-
-    base_dir: Path = args.base_dir
-    patient_dir: Path = base_dir / args.patient_folder
-
-    if not patient_dir.is_dir():
-        logging.error("Patient directory does not exist: %s", patient_dir)
-        sys.exit(1)
-
-    # ------------------------------------------------------------------
-    # LLM initialisieren
-    # ------------------------------------------------------------------
-    llm = init_llm(
-        model=args.model,
-        base_url=args.base_url,
-        temperature=args.temperature,
-    )
-
-    # ------------------------------------------------------------------
-    # Eingabepfade
-    # ------------------------------------------------------------------
-    path_diagnosis = patient_dir / "Arztbriefe" / "0_diagnoseköpfe"
-    path_therapy   = patient_dir / "Arztbriefe" / "1_therapieundverlauf"
-    path_befunde_dir = patient_dir / "Befunde"
-
-    # ------------------------------------------------------------------
-    # Rohtexte laden
-    # ------------------------------------------------------------------
-    try:
-        diagnosis_str = read_text_file(path_diagnosis)
-        therapy_str   = read_text_file(path_therapy)
-    except FileNotFoundError as exc:
-        logging.error("Aborting: %s", exc)
-        sys.exit(1)
-
-    # ------------------------------------------------------------------
-    # Schritt 1 – Diagnosis vereinheitlichen
-    # ------------------------------------------------------------------
-    out_diag_path = patient_dir / "unified_diagnosis.txt"
-    if skip_existing and out_diag_path.exists():
-        logging.info("Skipping diagnosis unification – output exists: %s", out_diag_path)
-    else:
-        run_llm_task(
-            llm=llm,
-            prompt_template=base_dir / "prompts" / "unifi_diagnosis.pmt",
-            sections={"Diagnosis": diagnosis_str},
-            output_path=out_diag_path,
-            task_name="Unify Diagnosis",
-        )
-
-    # ------------------------------------------------------------------
-    # Schritt 2 – Therapy vereinheitlichen
-    # ------------------------------------------------------------------
-    out_therapy_path = patient_dir / "unified_therapy.txt"
-    if skip_existing and out_therapy_path.exists():
-        logging.info("Skipping therapy unification – output exists: %s", out_therapy_path)
-    else:
-        run_llm_task(
-            llm=llm,
-            prompt_template=base_dir / "prompts" / "unifi_therapy.pmt",
-            sections={"Therapy": therapy_str},
-            output_path=out_therapy_path,
-            task_name="Unify Therapy",
-        )
-
-    # ------------------------------------------------------------------
-    # Schritt 3 – Vereinheitlichte Blöcke einlesen
-    # ------------------------------------------------------------------
-    try:
-        unified_diagnosis_str = read_text_file(out_diag_path)
-        unified_therapy_str   = read_text_file(out_therapy_path)
-    except FileNotFoundError as exc:
-        logging.error("Unified output missing: %s", exc)
-        sys.exit(1)
-
-    # ------------------------------------------------------------------
-    # Schritt 4 – Events extrahieren
-    # ------------------------------------------------------------------
-    extracted_events_path = patient_dir / "extracted_events.txt"
-    if skip_existing and extracted_events_path.exists():
-        logging.info("Skipping event extraction – output exists: %s", extracted_events_path)
-    else:
-        run_llm_task(
-            llm=llm,
-            prompt_template=base_dir / "prompts" / "extract_events.pmt",
-            sections={
-                "Diagnosis Head": unified_diagnosis_str,
-                "Therapy and Course": unified_therapy_str,
-            },
-            output_path=extracted_events_path,
-            task_name="Extract Events",
-        )
-
-    logging.info("LLM-basierte Tasks abgeschlossen.")
-
-    # ------------------------------------------------------------------
-    # Schritt 5 – Befunde den Events zuordnen
-    # ------------------------------------------------------------------
-    try:
-        extracted_events_str = read_text_file(extracted_events_path)
-    except FileNotFoundError as exc:
-        logging.error("Extracted events file not found: %s", exc)
-        sys.exit(1)
-
-    events = extracted_events_str.split("\n\n")[1:]
-    #print(event_blocks[0])
-    #print(event_blocks[1])
-    events = [block for block in events if [ normalize_date(m.group()) for m in re.finditer(DATE_REGEX, block, re.VERBOSE | re.IGNORECASE)]]
-
-    # Alle Befund-Dateien einlesen
-    befunde = [
-        p.read_text(encoding="utf-8", errors="ignore")
-        for p in path_befunde_dir.glob("*.txt")
-    ]
-
-    # Debug-Ausgabe: erkannte Datumsangaben pro Befund
-    for i, text in enumerate(befunde):
-        matches = [
-            normalize_date(m.group())
-            for m in re.finditer(DATE_REGEX, text, re.VERBOSE | re.IGNORECASE)
-        ]
-        logging.debug("Befund %02d – erkannte Daten: %s", i, matches)
-
-    befund_dates = [find_dates(befund) for befund in befunde]
-    event_dates  = [find_dates(event)  for event  in events]
-
-    # (min,max)-Intervalle bilden
-    event_date_ranges = [
-        (min(dts), max(dts)) if dts else (None, None) for dts in event_dates
-    ]
-
-    befund_date_ranges = []
-    for b_dates in befund_dates:
-        if not b_dates:                     # leere Liste → kein Intervall
-            befund_date_ranges.append((None, None))
-            continue
-
-        dates_iso = [date.fromisoformat(d) for d in b_dates]
-        max_d = max(dates_iso)
-        min_d = min(dates_iso)
-        lower = max_d - relativedelta(months=4)   # exakt 4 Monate zurück
-        if min_d < lower:
-            min_d = lower
-        befund_date_ranges.append((min_d.isoformat(), max_d.isoformat()))
-
-    # ------------------------------------------------------------------
-    # Überlappung {Events × Befunde} berechnen
-    # ------------------------------------------------------------------
-    def dates_overlapping(ev_range, bf_range, threshold=3) -> int:
-        """1 = Überlappung (±threshold Monate), sonst 0."""
-        if ev_range[0] is None or bf_range[0] is None:
-            return 0
-        ev_start, ev_end = map(date.fromisoformat, ev_range)
-        bf_start, bf_end = map(date.fromisoformat, bf_range)
-
-        max_start = max(ev_start, bf_start)
-        min_end   = min(ev_end,   bf_end)
-        overlap_days = (min_end - max_start).days
-        return 1 if overlap_days >= -30 * threshold else 0
-
-    def get_overlap_matrix(ev_ranges, bf_ranges, threshold=3) -> np.ndarray:
-        m = np.zeros((len(ev_ranges), len(bf_ranges)), dtype=np.int8)
-        for i, er in enumerate(ev_ranges):
-            for j, br in enumerate(bf_ranges):
-                m[i, j] = dates_overlapping(er, br, threshold)
-        return m
-
-    print(event_date_ranges)
-    print("")
-    print(befund_date_ranges)
-    print("")
-
-    overlap_matrix = get_overlap_matrix(event_date_ranges, befund_date_ranges)
-    logging.info("Overlap-Matrix (Zeilen=Events, Spalten=Befunde):\n%s", overlap_matrix)
-
-if __name__ == "__main__":
-    print("Hallo Welt")
-    main()
+Traceback (most recent call last):
+  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/sdexllm.py", line 16, in <module>
+    from utils.rag import retrieve_for_table
+  File "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/utils/rag.py", line 52, in <module>
+    ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/model.py", line 110, in encoding_for_model
+    return get_encoding(encoding_name_for_model(model_name))
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/registry.py", line 86, in get_encoding
+    enc = Encoding(**constructor())
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken_ext/openai_public.py", line 76, in cl100k_base
+    mergeable_ranks = load_tiktoken_bpe(
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 148, in load_tiktoken_bpe
+    contents = read_file_cached(tiktoken_bpe_file, expected_hash)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 63, in read_file_cached
+    contents = read_file(blobpath)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/tiktoken/load.py", line 22, in read_file
+    resp = requests.get(blobpath)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+  File "/opt/conda/envs/omini_env/lib/python3.10/site-packages/requests/adapters.py", line 700, in send
+    raise ConnectionError(e, request=request)
+requests.exceptions.ConnectionError: HTTPSConnectionPool(host='openaipublic.blob.core.windows.net', port=443): Max retries exceeded with url: /encodings/cl100k_base.tiktoken (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x14d2c802e980>: Failed to establish a new connection: [Errno 101] Network is unreachable'))
+Python-Skript beendet (Exit Code: 1). Beende ollama (PID: 1583493)...
+[vanjan02@hpc01-gpunode011 omini]$
