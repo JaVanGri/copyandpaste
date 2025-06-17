@@ -45,13 +45,14 @@ from typing import List, Tuple, Sequence, Dict, Any
 import re, numpy as np, faiss, tiktoken
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-tiktoken_cache_dir = "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/tiktoken"
+import os
+tiktoken_cache_dir = "/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/tiktoken"
+os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
 # ---------------------------------------------------------------------------
 # Globale Ressourcen
 # ---------------------------------------------------------------------------
 ENC               = tiktoken.encoding_for_model("text-embedding-3-large")
-_EMBED_MODEL      = SentenceTransformer("/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/model")
+_EMBED_MODEL      = SentenceTransformer("/media/veracrypt1/Projekte/SDEXLLM/GLA/Omini_6/model")
 
 # ---------------------------------------------------------------------------
 # PDF-Artefakte bereinigen
