@@ -267,17 +267,14 @@ def main() -> None:
             table_prompt = TABLES[table]['PROMPT']
             # LLM-Aufruf für die Tabelle
             table_output_path = Path(patient_dir / f"{table}_output.json")
-            if skip_existing and table_output_path.exists():
-                logging.info("Skipping table generation – output exists: %s", table_output_path)
-            else:
-                run_llm_task(
-                    llm=llm,
-                    prompt_template=table_prompt,
-                    sections={"Documents": final_info_string},
-                    output_path=table_output_path,
-                    task_name=f"Generate Table {table}",
-                )
-                logging.info("Tabelle %s erfolgreich generiert und gespeichert: %s", table, table_output_path)
+            run_llm_task(
+                llm=llm,
+                prompt_template=table_prompt,
+                sections={"Documents": final_info_string},
+                output_path=table_output_path,
+                task_name=f"Generate Table {table}",
+            )
+            logging.info("Tabelle %s erfolgreich generiert und gespeichert: %s", table, table_output_path)
     logging.info("Workflow abgeschlossen.")
         
     
