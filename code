@@ -1,243 +1,287 @@
-##############################################################################
-# RAG-Helper  —  Chunking · Embedding · FAISS-Retrieval (spalten­spezifisch)
-# Version 2025-06-16
-#
-# pip install
-#     sentence-transformers
-#     tiktoken
-#     langchain-text-splitters
-#     faiss-cpu        # oder faiss-gpu
-##############################################################################
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-retrieve_for_table
-------------------
-columns : Sequence[
-             Tuple[
-                 str,               # Spaltenname   – z. B. "Therapie"
-                 str,               # Beschreibung  – LLM-Prompt-Kontext
-                 Dict[str, Any] | None   # per-Spalten-Konfig (optional)
-             ]
-         ]
-docs    : Sequence[(befund_id:str, raw_text:str)]
-k       : Rückgabe-Passagen pro Spalte
-
-Spalten-Konfig-Keys (alle optional, sonst Default):
-    chunk_size   : int   – Chunk-Länge in BPE-Tokens    (Default 256)
-    overlap      : int   – Überlappung in Tokens        (Default 32)
-    cos_min      : float – Cosine-Schwellwert           (Default 0.30)
-    mmr_lambda   : float – MMR-Gewicht 0–1 (Diversität) (Default 0.20)
-
-Beispielaufruf
---------------
-cols = [
-    ("Name",          "Nachname des Patienten",
-        {"chunk_size": 64,  "overlap": 8,  "cos_min": 0.18, "mmr_lambda": 0.05}),
-    ("Therapie",      "Verabreichte Behandlung",
-        {"chunk_size": 256, "overlap": 32, "cos_min": 0.30, "mmr_lambda": 0.20}),
-    ("Prognosefaktor","Einfluss auf Überleben", None)   # Defaults
-]
-rows = retrieve_for_table(cols, befund_docs, k=3, debug=True)
+End-to-end Workflow für die Aufbereitung patientenbezogener Textdaten.
+Bei gesetztem SKIP_EXISTING werden Teilschritte übersprungen, wenn die
+jeweiligen Ausgabedateien bereits vorhanden sind.
 """
-# ---------------------------------------------------------------------------
 
-from __future__ import annotations
-from typing import List, Tuple, Sequence, Dict, Any
-import re, numpy as np, faiss, tiktoken
-from sentence_transformers import SentenceTransformer
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-import os
+import logging
+import sys
+import re
+from datetime import date
+from pathlib import Path
+from dateutil.relativedelta import relativedelta
+from prompts.tables import TABLES
+from utils.rag import retrieve_for_table
+import numpy as np
+from collections import defaultdict
 
-tiktoken_cache_dir = "/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/tiktoken"
-os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
-# ---------------------------------------------------------------------------
-# Globale Ressourcen
-# ---------------------------------------------------------------------------
-ENC               = tiktoken.get_encoding("cl100k_base")
-_EMBED_MODEL = SentenceTransformer("/pfssmain/departments/hematologie_Onko_immuno/20250130_OLLAMA_HPC/omini/Omini_8/model")
+from utils.llmutils import (
+    init_llm,
+    read_text_file,
+    run_llm_task,
+    setup_logging,
+    parse_args,
+)
+from utils.stringdateutils import find_dates, normalize_date, DATE_REGEX, get_overlap_matrix, merge_overlapping_segments
+
+# ------------------------------------------------------------------------------
+# Globale Schalter
+# ------------------------------------------------------------------------------
+SKIP_EXISTING = True          # ← True ⇒ vorhandene Outputs werden wiederverwendet
+# ------------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# PDF-Artefakte bereinigen
-# ---------------------------------------------------------------------------
-def clean_pdf_artifacts(text: str) -> str:
-    text = re.sub(r"(?:\b\w\b[\s­]?){4,}", lambda m: re.sub(r"[\s­]", "", m.group(0)), text)
-    text = re.sub(r"(\w)[-\u00AD]\s*\n\s*(\w)", r"\1\2", text)
-    return re.sub(r"[ \t\f\v]+", " ", text).strip()
+def main() -> None:
+    """Orchestriert den vollständigen Workflow."""
+    setup_logging()
+    args = parse_args()
 
+    # CLI-Override, falls parse_args() bereits --skip-existing kennt
+    skip_existing = getattr(args, "skip_existing", SKIP_EXISTING)
 
-# ---------------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------------
-def chunk_docs(docs: Sequence[str], *, max_chunk_tokens: int, overlap: int) -> tuple[list[str], list[dict]]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=max_chunk_tokens,
-        chunk_overlap=overlap,
-        length_function=lambda s: len(ENC.encode(s)),
-        separators=["\n\n", "\n", ". ", " "],
+    base_dir: Path = args.base_dir
+    patient_dir: Path = base_dir / args.patient_folder
+
+    if not patient_dir.is_dir():
+        logging.error("Patient directory does not exist: %s", patient_dir)
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # LLM initialisieren
+    # ------------------------------------------------------------------
+    llm = init_llm(
+        model=args.model,
+        base_url=args.base_url,
+        temperature=args.temperature,
     )
-    chunks, meta = [], []
-    for d_id, raw in enumerate(docs):
-        txt = clean_pdf_artifacts(raw)
-        pos = 0
-        for c_id, chunk in enumerate(splitter.split_text(txt)):
-            tok = len(ENC.encode(chunk))
-            chunks.append(chunk)
-            meta.append({"doc_id": d_id, "chunk_id": c_id, "start_tok": pos, "end_tok": pos + tok})
-            pos += tok - overlap
-    return chunks, meta
 
+    # ------------------------------------------------------------------
+    # Eingabepfade
+    # ------------------------------------------------------------------
+    path_diagnosis = patient_dir / "Arztbriefe" / "0_diagnoseköpfe"
+    path_therapy   = patient_dir / "Arztbriefe" / "1_therapieundverlauf"
+    path_befunde_dir = patient_dir / "Befunde"
 
-# ---------------------------------------------------------------------------
-# Embedding & Index
-# ---------------------------------------------------------------------------
-def embed(txts: Sequence[str]) -> np.ndarray:
-    return _EMBED_MODEL.encode(txts, batch_size=64, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+    # ------------------------------------------------------------------
+    # Rohtexte laden
+    # ------------------------------------------------------------------
+    try:
+        diagnosis_str = read_text_file(path_diagnosis)
+        therapy_str   = read_text_file(path_therapy)
+    except FileNotFoundError as exc:
+        logging.error("Aborting: %s", exc)
+        sys.exit(1)
 
+    # ------------------------------------------------------------------
+    # Schritt 1 – Diagnosis vereinheitlichen
+    # ------------------------------------------------------------------
+    out_diag_path = patient_dir / "unified_diagnosis.txt"
 
-def build_faiss_index(vecs: np.ndarray) -> faiss.IndexFlatIP:
-    idx = faiss.IndexFlatIP(vecs.shape[1]);
-    idx.add(vecs);
-    return idx
+    diag_prompt = read_text_file(base_dir / "prompts" / "unifi_diagnosis.pmt")
+    if skip_existing and out_diag_path.exists():
+        logging.info("Skipping diagnosis unification – output exists: %s", out_diag_path)
+    else:
+        run_llm_task(
+            llm=llm,
+            prompt_template=diag_prompt,
+            sections={"Diagnosis": diagnosis_str},
+            output_path=out_diag_path,
+            task_name="Unify Diagnosis",
+        )
 
+    # ------------------------------------------------------------------
+    # Schritt 2 – Therapy vereinheitlichen
+    # ------------------------------------------------------------------
+    out_therapy_path = patient_dir / "unified_therapy.txt"
 
-# ---------------------------------------------------------------------------
-# Near-Duplicate-Filter
-# ---------------------------------------------------------------------------
-def dedup_passages_info(recs: list[dict], *, thresh=0.90) -> list[dict]:
-    if len(recs) <= 1: return recs
-    vecs = embed([r["text"] for r in recs])
-    keep = np.ones(len(recs), bool)
-    for i in range(len(recs)):
-        if not keep[i]: continue
-        sims = vecs[i + 1:] @ vecs[i]
-        keep[i + 1:][sims >= thresh] = False
-    return [r for r, k in zip(recs, keep) if k]
+    therapy_prompt = read_text_file(base_dir / "prompts" / "unifi_therapy.pmt")
+    if skip_existing and out_therapy_path.exists():
+        logging.info("Skipping therapy unification – output exists: %s", out_therapy_path)
+    else:
+        run_llm_task(
+            llm=llm,
+            prompt_template=therapy_prompt,
+            sections={"Therapy": therapy_str},
+            output_path=out_therapy_path,
+            task_name="Unify Therapy",
+        )
 
+    # ------------------------------------------------------------------
+    # Schritt 3 – Vereinheitlichte Blöcke einlesen
+    # ------------------------------------------------------------------
+    try:
+        unified_diagnosis_str = read_text_file(out_diag_path)
+        unified_therapy_str   = read_text_file(out_therapy_path)
+    except FileNotFoundError as exc:
+        logging.error("Unified output missing: %s", exc)
+        sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Maximale Marginal Relevance
-# ---------------------------------------------------------------------------
-def mmr_select(mat: np.ndarray, q: np.ndarray, k: int, lam: float) -> list[int]:
-    sim_q = (mat @ q).flatten();
-    sel = []
-    while len(sel) < k and len(sel) < len(mat):
-        if not sel:
-            sel.append(int(sim_q.argmax()))
+    # ------------------------------------------------------------------
+    # Schritt 4 – Events extrahieren
+    # ------------------------------------------------------------------
+    extracted_events_path = patient_dir / "extracted_events.txt"
+    extract_events_prompt = read_text_file(base_dir / "prompts" / "extract_events.pmt")
+    if skip_existing and extracted_events_path.exists():
+        logging.info("Skipping event extraction – output exists: %s", extracted_events_path)
+    else:
+        run_llm_task(
+            llm=llm,
+            prompt_template=extract_events_prompt,
+            sections={
+                "Diagnosis Head": unified_diagnosis_str,
+                "Therapy and Course": unified_therapy_str,
+            },
+            output_path=extracted_events_path,
+            task_name="Extract Events",
+        )
+
+    logging.info("LLM-basierte Tasks abgeschlossen.")
+
+    # ------------------------------------------------------------------
+    # Schritt 5 – Befunde den Events zuordnen
+    # ------------------------------------------------------------------
+    try:
+        extracted_events_str = read_text_file(extracted_events_path)
+    except FileNotFoundError as exc:
+        logging.error("Extracted events file not found: %s", exc)
+        sys.exit(1)
+
+    event_blocks = extracted_events_str.split("\n\n")[1:]
+    events = [block for block in event_blocks if [normalize_date(m.group()) for m in re.finditer(DATE_REGEX, block, re.VERBOSE | re.IGNORECASE) ]]
+
+    # Alle Befund-Dateien einlesen
+    befunde = [
+        p.read_text(encoding="utf-8", errors="ignore")
+        for p in path_befunde_dir.glob("*.txt")
+    ]
+
+    # Debug-Ausgabe: erkannte Datumsangaben pro Befund
+    for i, text in enumerate(befunde):
+        matches = [
+            normalize_date(m.group())
+            for m in re.finditer(DATE_REGEX, text, re.VERBOSE | re.IGNORECASE)
+        ]
+        logging.debug("Befund %02d – erkannte Daten: %s", i, matches)
+
+    befund_dates = [find_dates(befund) for befund in befunde]
+    event_dates  = [find_dates(event)  for event  in events]
+
+    # (min,max)-Intervalle bilden
+    event_date_ranges = [
+        (min(dts), max(dts)) if dts else (None, None) for dts in event_dates
+    ]
+
+    befund_date_ranges = []
+    for b_dates in befund_dates:
+        if not b_dates:                     # leere Liste → kein Intervall
+            befund_date_ranges.append((None, None))
             continue
-        max_sim = (mat[sel] @ mat.T).max(axis=0)
-        score = lam * sim_q - (1 - lam) * max_sim
-        score[sel] = -1
-        sel.append(int(score.argmax()))
-    return sel
 
+        dates_iso = [date.fromisoformat(d) for d in b_dates]
+        max_d = max(dates_iso)
+        min_d = min(dates_iso)
+        lower = max_d - relativedelta(months=4)   # exakt 4 Monate zurück
+        if min_d < lower:
+            min_d = lower
+        befund_date_ranges.append((min_d.isoformat(), max_d.isoformat()))
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-DEF = dict(chunk_size=256, overlap=32, cos_min=0.30, mmr_lambda=0.20)
-CROSS_MIN = 0.1
-MAX_CHARS = 350
+    overlap_matrix = get_overlap_matrix(event_date_ranges, befund_date_ranges)
+    logging.info("Overlap-Matrix (Zeilen=Events, Spalten=Befunde):\n%s", overlap_matrix)
 
+    ###
 
-# ---------------------------------------------------------------------------
-# Hauptfunktion
-# ---------------------------------------------------------------------------
-def retrieve_for_table(
-        columns: Sequence[Tuple[str, str, Dict[str, Any] | None]],
-        docs: Sequence[Tuple[str, str]],
-        *,
-        k: int = 5,
-        use_rerank: bool = False,
-        dedup_thresh: float = 0.90,
-        debug: bool = False,
-) -> Dict[str, List[Dict[str, Any]]]:
-    # Rohtexte splitten ----------------------------------------------------
-    befund_ids, befund_txts, = zip(*docs)
+    tables = args.tables
+    print("tables:",tables)
+    print(TABLES)
+    for table in tables:
+        print(table in TABLES)
+        if table in TABLES:
+            table_columns = TABLES[table]['COLS']
+            event_table_befund_dict = {event: [] for event in events}
+            print("Schubadubudidida")
 
-    # Cache: (size, ovl) -> (chunks, meta, vecs, index)
-    cache: dict[tuple[int, int], tuple[list[str], list[dict], np.ndarray, faiss.IndexFlatIP]] = {}
+            for i, event in enumerate(events):
+                print(f"Event {i+1}:")
+                # events that overlap with the current event
+                list_of_befunde = [ befund for j,befund in enumerate(befunde) if overlap_matrix[i][j] ]
+                if not list_of_befunde:
+                    print("No overlapping befunds found.")
+                    continue
+                print(f"  Found {len(list_of_befunde)} overlapping befunds.")
+                docs = [ (str(i), befund) for i, befund in enumerate(list_of_befunde) ]
+                retrieved_befunde = retrieve_for_table(table_columns, docs, debug=False,use_rerank=False,k=10,dedup_thresh=0.9)
+                event_table_befund_dict[event] = retrieved_befunde
 
-    def get_cached(size, ovl):
-        key = (size, ovl)
-        if key not in cache:
-            ch, mt = chunk_docs(befund_txts, max_chunk_tokens=size, overlap=ovl)
-            vec = embed(ch)
-            cache[key] = (ch, mt, vec, build_faiss_index(vec))
-        return cache[key]
+            # Ihre ursprüngliche Struktur
+            data = event_table_befund_dict
+            by_event_befund = defaultdict(dict)
+            # Invertieren
+            for event, befunds in data.items():
+                #print(befunds)
+                by_event_befund[event] = defaultdict(list)
+                if type(befunds) is dict:
+                    for label, befunde in befunds.items():
+                        for befund in befunde:
+                            befund_id = befund['befund_id']
+                            start_token = befund['start_tok']
+                            end_token = befund['end_tok']
+                            text = befund['text']
+                            #print(f"befund_id: {label}: {befund_id}")
+                            if befund_id not in by_event_befund[event]:
+                                by_event_befund[event][befund_id] = [{
+                                    'start_tok': start_token,
+                                    'end_tok': end_token,
+                                    'text': text,
+                                    'label' : label
+                                }]
+                            else:
+                                by_event_befund[event][befund_id].append({
+                                    'start_tok': start_token,
+                                    'end_tok': end_token,
+                                    'text': text,
+                                    'label' : label
+                                })
 
-    # Cross-Encoder optional
-    if use_rerank:
-        from sentence_transformers import CrossEncoder
-        reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            for event, befund_dict in by_event_befund.items():
+                for befund_id, segs in befund_dict.items():
+                    befund_dict[befund_id] = merge_overlapping_segments(segs)
 
-    # Ergebnis-Dict
-    out: Dict[str, List[Dict[str, Any]]] = {}
+            final_info_string = ""
+            for event in events:
+                befunde = by_event_befund[event]
+                final_info_string += f"Event: {event}\n"
+                final_info_string += "Weitere Informaioenaus Befunden:\n"
+                for befund_id, segments in befunde.items():
+                    final_info_string += f"-Befund ID: {befund_id}\n"
+                    for segment in segments:
+                        final_info_string += f"\tText: {segment['text']}, evtl relevant für: {', '.join(segment['labels'])}\n"
+                final_info_string += "\n"
+            print(final_info_string)
+            print("\n------------------\n\n")
 
-    # Schleife über Spalten -------------------------------------------------
-    for name, descr, cfg_raw in columns:
-        cfg = {**DEF, **(cfg_raw or {})}
+            final_info_string = "Information from Documents: \n" + final_info_string
 
-        chunks, meta, vecs, index = get_cached(cfg["chunk_size"], cfg["overlap"])
-        info = [{"befund_id": befund_ids[m["doc_id"]],
-                 "start_tok": m["start_tok"],
-                 "end_tok": m["end_tok"],
-                 "text": chunks[i]} for i, m in enumerate(meta)]
+            # Table Prompt vorbereiten
+            table_prompt = TABLES[table]['PROMPT']
+            # LLM-Aufruf für die Tabelle
+            table_output_path = Path(patient_dir / f"{table}_output.json")
+            if skip_existing and table_output_path.exists():
+                logging.info("Skipping table generation – output exists: %s", table_output_path)
+            else:
+                run_llm_task(
+                    llm=llm,
+                    prompt_template=table_prompt,
+                    sections={"Documents": final_info_string},
+                    output_path=table_output_path,
+                    task_name=f"Generate Table {table}",
+                )
+                logging.info("Tabelle %s erfolgreich generiert und gespeichert: %s", table, table_output_path)
+    logging.info("Workflow abgeschlossen.")
+        
+    
 
-        query = f"{name}: {descr}".strip()
-        q_vec = embed([query])
-
-        n = max(k * 5, 10)
-        cos, I = index.search(q_vec, n)
-        cross = (reranker.predict([[query, chunks[i]] for i in I[0]]) if use_rerank else [None] * n)
-
-        passed, p_vecs = [], []
-        for rnk, idx in enumerate(I[0]):
-            rec = {**info[idx], "cosine": float(cos[0][rnk])}
-            if 'Jan' in rec['text']:
-                print(rec)
-            if cos[0][rnk] < cfg["cos_min"]: continue
-            if cross[rnk] is not None and cross[rnk] < CROSS_MIN: continue
-
-            if len(rec["text"]) > MAX_CHARS: rec["text"] = rec["text"][:MAX_CHARS] + " …"
-            passed.append(rec);
-            p_vecs.append(vecs[idx])
-
-        if not passed: out[name] = []; continue
-        passed = dedup_passages_info(passed, thresh=dedup_thresh)
-        p_vecs = embed([r["text"] for r in passed])
-
-        if cfg["mmr_lambda"] > 0 and len(passed) > k:
-            sel = mmr_select(np.vstack(p_vecs), q_vec.squeeze(), k=k, lam=cfg["mmr_lambda"])
-            passed = [passed[i] for i in sel]
-
-        out[name] = passed[:k]
-
-        if debug:
-            print(f"\n▌{name}  cfg={cfg}  hits={len(out[name])}")
-            for i, rec in enumerate(out[name], 1):
-                txt = rec['text'].replace('\n', ' ')[:120]
-                print(f"{i:>2}. [{rec['befund_id']} {rec['start_tok']}-{rec['end_tok']}] {txt}")
-
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Minimal-Test
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    docs = [
-        ("Befund1.txt", "Name: Max Mustermann\nLDH 312 U/l\nTherapie: Lenalidomid 22 mg ..."),
-        ("Befund2.txt", "Behandlung mit Retowax 9 ...")
-
-    ]
-    cols = [
-        ("Name", "Nachname des Patienten", {"chunk_size": 8, "overlap": 3, "cos_min": 0.18, "mmr_lambda": 0.05}),
-        ("Therapie", "Verabreichte Therapie und Behandlung",
-         {"chunk_size": 20, "cos_min": 0.18, "overlap": 3, "mmr_lambda": 0.02}),
-        ("Prognosefaktor", "Einfluss auf Überleben", None)
-    ]
-    res = retrieve_for_table(cols, docs, k=3, debug=True, use_rerank=False)
-    from pprint import pprint;
-
-    pprint(res, width=120)
+    main()
